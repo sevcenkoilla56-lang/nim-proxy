@@ -28,47 +28,63 @@ app.get("/v1/models", (req, res) => {
   });
 });
 
-// Translates text from Chinese to English using Google Translate's free endpoint
-async function translateToEnglish(text) {
+// Splits long text into chunks so Google Translate doesn't choke on it
+function splitIntoChunks(text, maxLength = 1000) {
+  const chunks = [];
+  let current = "";
+  const sentences = text.split(/(?<=[。！？\.\!\?])/);
+  for (const sentence of sentences) {
+    if ((current + sentence).length > maxLength) {
+      if (current) chunks.push(current.trim());
+      current = sentence;
+    } else {
+      current += sentence;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks.length > 0 ? chunks : [text];
+}
+
+// Translates a single chunk with a timeout so it never hangs forever
+async function translateChunk(text) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
   try {
     const url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=zh-CN&tl=en&dt=t&q=" + encodeURIComponent(text);
-    const resp = await fetch(url);
+    const resp = await fetch(url, { signal: controller.signal });
     const data = await resp.json();
-    // Google returns nested arrays — this joins all translated chunks together
-    const translated = data[0].map(chunk => chunk[0]).join("");
-    return translated;
+    return data[0].map(chunk => chunk[0]).join("");
   } catch (err) {
-    console.error("Translation failed:", err);
-    // If translation fails for any reason, return the original text untouched
+    // If this chunk times out or fails, return it untranslated rather than crashing
+    console.error("Chunk translation failed:", err.message);
     return text;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
-// Finds the <think>...</think> block, translates it, puts it back
+// Translates long text by breaking it into smaller pieces
+async function translateToEnglish(text) {
+  const chunks = splitIntoChunks(text, 1000);
+  const translated = await Promise.all(chunks.map(translateChunk));
+  return translated.join(" ");
+}
+
+// Finds the <think> block, translates it, puts it back
 async function translateThinkingBlock(text) {
   if (!text) return text;
 
   const thinkMatch = text.match(/<think>([\s\S]*?)<\/think>/i);
-
-  if (!thinkMatch) {
-    // No thinking block found — return as is
-    return text;
-  }
+  if (!thinkMatch) return text;
 
   const originalThinking = thinkMatch[1].trim();
   const afterThink = text.replace(/<think>[\s\S]*?<\/think>/i, "").trim();
 
-  // Only translate if it actually contains Chinese characters
   const hasChinese = /[\u4e00-\u9fff]/.test(originalThinking);
-
-  if (!hasChinese) {
-    // Already in English — no translation needed
-    return text;
-  }
+  if (!hasChinese) return text;
 
   const translatedThinking = await translateToEnglish(originalThinking);
 
-  // Rebuild the message with translated thinking block + the final reply
   return `<think>\n${translatedThinking}\n</think>\n\n${afterThink}`;
 }
 
@@ -102,15 +118,16 @@ app.post("/v1/chat/completions", async (req, res) => {
       "Accept": "application/json"
     };
 
+    // Give NVIDIA up to 90 seconds to respond
     const nvidiaResp = await fetch(`${NVIDIA_BASE_URL}/chat/completions`, {
       method: "POST",
       headers: headers,
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      timeout: 90000
     });
 
     const data = await nvidiaResp.json();
 
-    // Translate thinking blocks in all choices
     if (data.choices && Array.isArray(data.choices)) {
       for (let i = 0; i < data.choices.length; i++) {
         if (data.choices[i].message && data.choices[i].message.content) {
