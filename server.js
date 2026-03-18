@@ -13,7 +13,7 @@ const DEFAULT_MODEL = "moonshotai/kimi-k2.5";
 // 512 = quick thoughts, rarely times out
 // 1024 = moderate, good balance
 // 2048 = deeper thinking, might occasionally be slow
-const MAX_THINKING_TOKENS = 512;
+const MAX_THINKING_TOKENS = 2048;
 
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
