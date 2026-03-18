@@ -9,6 +9,12 @@ const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || "";
 const NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1";
 const DEFAULT_MODEL = "moonshotai/kimi-k2.5";
 
+// How many tokens Kimi is allowed to spend thinking
+// 512 = quick thoughts, rarely times out
+// 1024 = moderate, good balance
+// 2048 = deeper thinking, might occasionally be slow
+const MAX_THINKING_TOKENS = 512;
+
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 
@@ -28,7 +34,6 @@ app.get("/v1/models", (req, res) => {
   });
 });
 
-// Splits long text into chunks so Google Translate doesn't choke on it
 function splitIntoChunks(text, maxLength = 1000) {
   const chunks = [];
   let current = "";
@@ -45,17 +50,15 @@ function splitIntoChunks(text, maxLength = 1000) {
   return chunks.length > 0 ? chunks : [text];
 }
 
-// Translates a single chunk with a timeout so it never hangs forever
 async function translateChunk(text) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
+  const timeout = setTimeout(() => controller.abort(), 6000);
   try {
     const url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=zh-CN&tl=en&dt=t&q=" + encodeURIComponent(text);
     const resp = await fetch(url, { signal: controller.signal });
     const data = await resp.json();
     return data[0].map(chunk => chunk[0]).join("");
   } catch (err) {
-    // If this chunk times out or fails, return it untranslated rather than crashing
     console.error("Chunk translation failed:", err.message);
     return text;
   } finally {
@@ -63,14 +66,12 @@ async function translateChunk(text) {
   }
 }
 
-// Translates long text by breaking it into smaller pieces
 async function translateToEnglish(text) {
   const chunks = splitIntoChunks(text, 1000);
   const translated = await Promise.all(chunks.map(translateChunk));
   return translated.join(" ");
 }
 
-// Finds the <think> block, translates it, puts it back
 async function translateThinkingBlock(text) {
   if (!text) return text;
 
@@ -112,18 +113,20 @@ app.post("/v1/chat/completions", async (req, res) => {
     if (!body.max_tokens) body.max_tokens = 1024;
     body.max_tokens = Math.min(Number(body.max_tokens), 4096);
 
+    // This is the key line — caps how long Kimi is allowed to think
+    body.chat_template_kwargs = { max_thinking_tokens: MAX_THINKING_TOKENS };
+
     const headers = {
       "Authorization": `Bearer ${NVIDIA_API_KEY}`,
       "Content-Type": "application/json",
       "Accept": "application/json"
     };
 
-    // Give NVIDIA up to 90 seconds to respond
     const nvidiaResp = await fetch(`${NVIDIA_BASE_URL}/chat/completions`, {
       method: "POST",
       headers: headers,
       body: JSON.stringify(body),
-      timeout: 90000
+      timeout: 25000
     });
 
     const data = await nvidiaResp.json();
